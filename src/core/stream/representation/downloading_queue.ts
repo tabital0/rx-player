@@ -45,7 +45,8 @@ import {
 import assert from "../../../utils/assert";
 import assertUnreachable from "../../../utils/assert_unreachable";
 import objectAssign from "../../../utils/object_assign";
-import { IReadOnlySharedReference } from "../../../utils/reference";
+import createSharedReference, { IReadOnlySharedReference, ISharedReference } from "../../../utils/reference";
+import TaskCanceller from "../../../utils/task_canceller";
 import {
   IPrioritizedSegmentFetcher,
   IPrioritizedSegmentFetcherEvent,
@@ -87,7 +88,7 @@ export default class DownloadingQueue<T> {
   /** Interface used to load segments. */
   private _segmentFetcher : IPrioritizedSegmentFetcher<T>;
   /** Emit the timescale anounced in the initialization segment once parsed. */
-  private _initSegmentMetadata$ : ReplaySubject<number | undefined>;
+  private _initSegmentMetadata$ : ISharedReference<number | undefined | null>;
   /**
    * Some media segments might have been loaded and are only awaiting for the
    * initialization segment to be parsed before being parsed themselves.
@@ -129,10 +130,10 @@ export default class DownloadingQueue<T> {
     this._initSegmentRequest = null;
     this._mediaSegmentRequest = null;
     this._segmentFetcher = segmentFetcher;
-    this._initSegmentMetadata$ = new ReplaySubject<number|undefined>(1);
+    this._initSegmentMetadata$ = createSharedReference(undefined);
     this._mediaSegmentsAwaitingInitMetadata = new Set();
     if (!hasInitSegment) {
-      this._initSegmentMetadata$.next(undefined);
+      this._initSegmentMetadata$.setValue(null);
     }
   }
 
@@ -254,56 +255,155 @@ export default class DownloadingQueue<T> {
       }
       const { segment, priority } = startingSegment;
       const context = objectAssign({ segment }, this._content);
-      const request$ = this._segmentFetcher.createRequest(context, priority);
+      const request$ = new Observable((obs) => {
+        let isComplete = false;
+        const canceller = new TaskCanceller();
+        this._segmentFetcher.createRequest(context,
+                                           priority,
+                                           { onRetry,
+                                             // onInterrupted,
+                                             // onEnded,
+                                             onChunk,
+                                             onAllChunksReceived },
+                                           canceller.signal)
+          .then(
+            () => {
+              isComplete = true;
+              obs.complete();
+            },
+            (error : unknown) => {
+              isComplete = true;
+              obs.error(error);
+            }
+          );
 
-      this._mediaSegmentRequest = { segment, priority, request$ };
-      return request$
-        .pipe(mergeMap((evt) => {
-          switch (evt.type) {
-            case "retry":
-              return observableOf({ type: "retry" as const,
-                                    value: { segment, error: evt.value } });
-            case "interrupted":
-              log.info("Stream: segment request interrupted temporarly.", segment);
-              return EMPTY;
+        /* eslint-disable-next-line @typescript-eslint/no-this-alias */
+        const self = this;
+        function onRetry(error : ICustomError) {
+          obs.next({ type: "retry" as const,
+                     value: { segment, error } });
+        }
+        // function onInterrupted() {
+        //   log.info("Stream: segment request interrupted temporarly.", segment);
+        // }
 
-            case "ended":
-              this._mediaSegmentRequest = null;
-              const lastQueue = this._downloadQueue.getValue().segmentQueue;
-              if (lastQueue.length === 0) {
-                return observableOf({ type : "end-of-queue" as const,
-                                      value : null });
-              } else if (lastQueue[0].segment.id === segment.id) {
-                lastQueue.shift();
-              }
-              return recursivelyRequestSegments(lastQueue[0]);
+        // let innerSub;
+        // function onEnded() {
+        //   obs.next({ type: "ended" as const });
+        //   self._mediaSegmentRequest = null;
+        //   const lastQueue = self._downloadQueue.getValue().segmentQueue;
+        //   if (lastQueue.length === 0) {
+        //     obs.next({ type : "end-of-queue" as const,
+        //                value : null });
+        //   } else if (lastQueue[0].segment.id === segment.id) {
+        //     lastQueue.shift();
+        //   }
+        //   innerSub = recursivelyRequestSegments(lastQueue[0]).subscribe(obs);
+        // }
 
-            case "chunk":
-            case "chunk-complete":
-              this._mediaSegmentsAwaitingInitMetadata.add(segment.id);
-              return this._initSegmentMetadata$.pipe(
-                take(1),
-                map((initTimescale) => {
-                  if (evt.type === "chunk-complete") {
-                    return { type: "end-of-segment" as const,
-                             value: { segment } };
-                  }
-                  const parsed = evt.parse(initTimescale);
-                  assert(parsed.segmentType === "media",
-                         "Should have loaded a media segment.");
-                  return objectAssign({},
-                                      parsed,
-                                      { type: "parsed-media" as const,
-                                        segment });
-                }),
-                finalize(() => {
-                  this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
-                }));
-
-            default:
-              assertUnreachable(evt);
+        function onChunk(
+          parse : (initTimescale : number) => ISegmentParserParsedInitChunk<T> |
+                                              ISegmentParserParsedMediaChunk<T>
+        ) {
+          obs.next({ type: "chunk" as const, value: parse });
+        }
+        function onAllChunksReceived() {
+          obs.next({ type: "chunk-complete" as const });
+          if (self._initSegmentMetadata$.getValue() !== undefined) {
+            obs.next({ type: "end-of-segment" as const,
+                       value: { segment } });
+            return;
           }
-        }));
+          self._mediaSegmentsAwaitingInitMetadata.add(segment.id);
+          // XXX TODO unsub
+          self._initSegmentMetadata$.onUpdate((val, unlisten) => {
+            obs.next({ type: "end-of-segment" as const,
+                       value: { segment } });
+            unlisten();
+            this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
+          }, { clearSignal: canceller.signal });
+      //         return this._initSegmentMetadata$.pipe(
+      //           take(1),
+      //           map((initTimescale) => {
+      //             if (evt.type === "chunk-complete") {
+      //               return { type: "end-of-segment" as const,
+      //                        value: { segment } };
+      //             }
+      //             const parsed = evt.parse(initTimescale);
+      //             assert(parsed.segmentType === "media",
+      //                    "Should have loaded a media segment.");
+      //             return objectAssign({},
+      //                                 parsed,
+      //                                 { type: "parsed-media" as const,
+      //                                   segment });
+      //           }),
+      //           finalize(() => {
+      //             this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
+      //           }));
+        }
+
+        return () => {
+          if (isComplete) {
+            return;
+          }
+          isComplete = true;
+          // if (innerSub) {
+          //   innerSub.unsubscribe();
+          // }
+          // XXX TODO
+          this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
+          canceller.cancel();
+        };
+      });
+      // XXX TODO
+      this._mediaSegmentRequest = { segment, priority, request$ };
+      return request$;
+      // return request$
+      //   .pipe(mergeMap((evt) => {
+      //     switch (evt.type) {
+      //       case "retry":
+      //         return observableOf({ type: "retry" as const,
+      //                               value: { segment, error: evt.value } });
+      //       case "interrupted":
+      //         return EMPTY;
+
+      //       case "ended":
+      //         this._mediaSegmentRequest = null;
+      //         const lastQueue = this._downloadQueue.getValue().segmentQueue;
+      //         if (lastQueue.length === 0) {
+      //           return observableOf({ type : "end-of-queue" as const,
+      //                                 value : null });
+      //         } else if (lastQueue[0].segment.id === segment.id) {
+      //           lastQueue.shift();
+      //         }
+      //         return recursivelyRequestSegments(lastQueue[0]);
+
+      //       case "chunk":
+      //       case "chunk-complete":
+      //         this._mediaSegmentsAwaitingInitMetadata.add(segment.id);
+      //         return this._initSegmentMetadata$.pipe(
+      //           take(1),
+      //           map((initTimescale) => {
+      //             if (evt.type === "chunk-complete") {
+      //               return { type: "end-of-segment" as const,
+      //                        value: { segment } };
+      //             }
+      //             const parsed = evt.parse(initTimescale);
+      //             assert(parsed.segmentType === "media",
+      //                    "Should have loaded a media segment.");
+      //             return objectAssign({},
+      //                                 parsed,
+      //                                 { type: "parsed-media" as const,
+      //                                   segment });
+      //           }),
+      //           finalize(() => {
+      //             this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
+      //           }));
+
+      //       default:
+      //         assertUnreachable(evt);
+      //     }
+      //   }));
     };
 
     return observableDefer(() =>
@@ -358,7 +458,8 @@ export default class DownloadingQueue<T> {
               // side-effect a posteriori in a concat operator
               observableDefer(() => {
                 if (parsed.segmentType === "init") {
-                  this._initSegmentMetadata$.next(parsed.initTimescale);
+                  // XXX TODO `null` if undefined
+                  this._initSegmentMetadata$.setValue(parsed.initTimescale);
                 }
                 return EMPTY;
               }));

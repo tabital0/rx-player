@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { Observable } from "rxjs";
+import PPromise from "pinkie";
 import config from "../../../config";
 import {
   formatError,
@@ -40,9 +40,7 @@ import idGenerator from "../../../utils/id_generator";
 import InitializationSegmentCache from "../../../utils/initialization_segment_cache";
 import isNullOrUndefined from "../../../utils/is_null_or_undefined";
 import objectAssign from "../../../utils/object_assign";
-import TaskCanceller, {
-  CancellationSignal,
-} from "../../../utils/task_canceller";
+import { CancellationSignal } from "../../../utils/task_canceller";
 import {
   IABRMetricsEventValue,
   IABRRequestBeginEventValue,
@@ -64,14 +62,14 @@ const generateRequestID = idGenerator();
  *
  * @param {string} bufferType
  * @param {Object} transport
- * @param {Object} callbacks
+ * @param {Object} creatorCallbacks
  * @param {Object} options
  * @returns {Function}
  */
 export default function createSegmentFetcher<TLoadedFormat, TSegmentDataType>(
   bufferType : IBufferType,
   pipeline : ISegmentPipeline<TLoadedFormat, TSegmentDataType>,
-  callbacks : ISegmentFetcherCreatorCallbacks,
+  creatorCallbacks : ISegmentFetcherCreatorCallbacks,
   options : ISegmentFetcherOptions
 ) : ISegmentFetcher<TSegmentDataType> {
   /**
@@ -101,237 +99,238 @@ export default function createSegmentFetcher<TLoadedFormat, TSegmentDataType>(
    * @returns {Observable}
    */
   return function fetchSegment(
-    content : ISegmentLoaderContent
-  ) : Observable<ISegmentFetcherEvent<TSegmentDataType>> {
+    content : ISegmentLoaderContent,
+    fetcherCallbacks : ISegmentFetcherCallbacks<TSegmentDataType>,
+    cancellationSignal : CancellationSignal
+  ) : Promise<void> {
     const { segment } = content;
 
     // used by logs
     const segmentIdString = getLoggableSegmentId(content);
+    const requestId = generateRequestID();
 
-    return new Observable((obs) => {
-      const requestId = generateRequestID();
-      const canceller = new TaskCanceller();
+    /**
+     * If the request succeeded, set to the corresponding
+     * `IChunkCompleteInformation` object.
+     * For any other completion cases: if the request either failed, was
+     * cancelled or just if no request was needed, set to `null`.
+     *
+     * Stays to `undefined` when the request is still pending.
+     */
+    let requestInfo : IChunkCompleteInformation | null | undefined;
 
+    /**
+     * Array containing one entry per loaded chunk, in chronological order.
+     * The boolean indicates if the chunk has been parsed at least once.
+     *
+     * This is used to know when all loaded chunks have been parsed, which
+     * can be useful to e.g. construct metrics about the loaded segment.
+     */
+    const parsedChunks : boolean[] = [];
+
+    /**
+     * Addition of the duration of each encountered and parsed chunks.
+     * Allows to have an idea of the real duration of the full segment once
+     * all chunks have been parsed.
+     *
+     * `undefined` if at least one of the parsed chunks has unknown duration.
+     */
+    let segmentDurationAcc : number | undefined = 0;
+
+    /** Set to `true` once network metrics have been sent. */
+    let metricsSent = false;
+
+    const loaderCallbacks = {
       /**
-       * If the request succeeded, set to the corresponding
-       * `IChunkCompleteInformation` object.
-       * For any other completion cases: if the request either failed, was
-       * cancelled or just if no request was needed, set to `null`.
-       *
-       * Stays to `undefined` when the request is still pending.
+       * Callback called when the segment loader has progress information on
+       * the request.
+       * @param {Object} info
        */
-      let requestInfo : IChunkCompleteInformation | null | undefined;
-
-      /**
-       * Array containing one entry per loaded chunk, in chronological order.
-       * The boolean indicates if the chunk has been parsed at least once.
-       *
-       * This is used to know when all loaded chunks have been parsed, which
-       * can be useful to e.g. construct metrics about the loaded segment.
-       */
-      const parsedChunks : boolean[] = [];
-
-      /**
-       * Addition of the duration of each encountered and parsed chunks.
-       * Allows to have an idea of the real duration of the full segment once
-       * all chunks have been parsed.
-       *
-       * `undefined` if at least one of the parsed chunks has unknown duration.
-       */
-      let segmentDurationAcc : number | undefined = 0;
-
-      /** Set to `true` once network metrics have been sent. */
-      let metricsSent = false;
-
-      const loaderCallbacks = {
-        /**
-         * Callback called when the segment loader has progress information on
-         * the request.
-         * @param {Object} info
-         */
-        onProgress(info : ISegmentLoadingProgressInformation) : void {
-          if (info.totalSize !== undefined && info.size < info.totalSize) {
-            callbacks.onProgress?.({ duration: info.duration,
-                                     size: info.size,
-                                     totalSize: info.totalSize,
-                                     timestamp: performance.now(),
-                                     id: requestId });
-          }
-        },
-
-        /**
-         * Callback called when the segment is communicated by the loader
-         * through decodable sub-segment(s) called chunk(s), with a chunk in
-         * argument.
-         * @param {*} chunkData
-         */
-        onNewChunk(chunkData : TLoadedFormat) : void {
-          obs.next({ type: "chunk" as const,
-                     parse: generateParserFunction(chunkData, true) });
-        },
-      };
-
-      // Retrieve from cache if it exists
-      const cached = cache !== undefined ? cache.get(content) :
-                                           null;
-      if (cached !== null) {
-        log.debug("SF: Found wanted segment in cache", segmentIdString);
-        obs.next({ type: "chunk" as const,
-                   parse: generateParserFunction(cached, false) });
-        obs.next({ type: "chunk-complete" as const });
-        obs.complete();
-        return undefined;
-      }
-
-      log.debug("SF: Beginning request", segmentIdString);
-      callbacks.onRequestBegin?.({ requestTimestamp: performance.now(),
-                                   id: requestId,
-                                   content });
-
-      tryURLsWithBackoff(segment.mediaURLs ?? [null],
-                         callLoaderWithUrl,
-                         objectAssign({ onRetry }, options),
-                         canceller.signal)
-        .then((res) => {
-          log.debug("SF: Segment request ended with success", segmentIdString);
-
-          if (res.resultType === "segment-loaded") {
-            const loadedData = res.resultData.responseData;
-            if (cache !== undefined) {
-              cache.add(content, res.resultData.responseData);
-            }
-            obs.next({ type: "chunk" as const,
-                       parse: generateParserFunction(loadedData, false) });
-          } else if (res.resultType === "segment-created") {
-            obs.next({ type: "chunk" as const,
-                       parse: generateParserFunction(res.resultData, false) });
-          }
-
-          log.debug("SF: Segment request ended with success", segmentIdString);
-          obs.next({ type: "chunk-complete" as const });
-
-          if (res.resultType !== "segment-created") {
-            requestInfo = res.resultData;
-            sendNetworkMetricsIfAvailable();
-          } else {
-            requestInfo = null;
-          }
-
-          if (!canceller.isUsed) {
-            // The current Observable could have been canceled as a result of one
-            // of the previous `next` calls. In that case, we don't want to send
-            // a "requestEnd" again as it has already been sent on cancellation.
-            //
-            // Note that we only perform this check for `onRequestEnd` on
-            // purpose. Observable's events should have been ignored by RxJS if
-            // the Observable has already been canceled and we don't care if
-            // `"metrics"` is sent there.
-            callbacks.onRequestEnd?.({ id: requestId });
-          }
-          obs.complete();
-        })
-        .catch((err) => {
-          log.debug("SF: Segment request failed", segmentIdString);
-          requestInfo = null;
-          obs.error(errorSelector(err));
-        });
-
-      return () => {
-        if (requestInfo !== undefined) {
-          return; // Request already terminated
+      onProgress(info : ISegmentLoadingProgressInformation) : void {
+        if (info.totalSize !== undefined && info.size < info.totalSize) {
+          creatorCallbacks.onProgress?.({ duration: info.duration,
+                                          size: info.size,
+                                          totalSize: info.totalSize,
+                                          timestamp: performance.now(),
+                                          id: requestId });
         }
-        log.debug("SF: Segment request cancelled", segmentIdString);
-        requestInfo = null;
-        canceller.cancel();
-        callbacks.onRequestEnd?.({ id: requestId });
-      };
+      },
 
       /**
-       * Call a segment loader for the given URL with the right arguments.
-       * @param {string|null} url
-       * @param {Object} cancellationSignal
-       * @returns {Promise}
+       * Callback called when the segment is communicated by the loader
+       * through decodable sub-segment(s) called chunk(s), with a chunk in
+       * argument.
+       * @param {*} chunkData
        */
-      function callLoaderWithUrl(
-        url : string | null,
-        cancellationSignal: CancellationSignal
-      ) {
-        return loadSegment(url, content, cancellationSignal, loaderCallbacks);
+      onNewChunk(chunkData : TLoadedFormat) : void {
+        fetcherCallbacks.onChunk(generateParserFunction(chunkData, true));
+      },
+    };
+
+    // Retrieve from cache if it exists
+    const cached = cache !== undefined ? cache.get(content) :
+                                         null;
+    if (cached !== null) {
+      log.debug("SF: Found wanted segment in cache", segmentIdString);
+      fetcherCallbacks.onChunk(generateParserFunction(cached, false));
+      return PPromise.resolve();
+    }
+
+    log.debug("SF: Beginning request", segmentIdString);
+    creatorCallbacks.onRequestBegin?.({ requestTimestamp: performance.now(),
+                                        id: requestId,
+                                        content });
+
+    cancellationSignal.register(() => {
+      if (requestInfo !== undefined) {
+        return; // Request already terminated
       }
-
-      /**
-       * Generate function allowing to parse a loaded segment.
-       * @param {*} data
-       * @param {Boolean} isChunked
-       * @returns {Function}
-       */
-      function generateParserFunction(data : TLoadedFormat, isChunked : boolean)  {
-        parsedChunks.push(false);
-        const parsedChunkId = parsedChunks.length - 1;
-        return function parse(initTimescale? : number) :
-          ISegmentParserParsedInitChunk<TSegmentDataType> |
-          ISegmentParserParsedMediaChunk<TSegmentDataType>
-        {
-          const loaded = { data, isChunked };
-
-          try {
-            const parsed = parseSegment(loaded, content, initTimescale);
-
-            if (!parsedChunks[parsedChunkId]) {
-              segmentDurationAcc = segmentDurationAcc !== undefined &&
-                                   parsed.segmentType === "media" &&
-                                   parsed.chunkInfos !== null &&
-                                   parsed.chunkInfos.duration !== undefined ?
-                segmentDurationAcc + parsed.chunkInfos.duration :
-                undefined;
-              parsedChunks[parsedChunkId] = true;
-
-              sendNetworkMetricsIfAvailable();
-            }
-            return parsed;
-          } catch (error) {
-            throw formatError(error, { defaultCode: "PIPELINE_PARSE_ERROR",
-                                       defaultReason: "Unknown parsing error" });
-          }
-        };
-      }
-
-      /**
-       * Function called when the function request is retried.
-       * @param {*} err
-       */
-      function onRetry(err: unknown) : void {
-        obs.next({ type: "retry" as const,
-                   value: errorSelector(err) });
-      }
-
-      /**
-       * Send netork metrics if they haven't yet been sent and if all data to
-       * define them is available.
-       */
-      function sendNetworkMetricsIfAvailable() : void {
-        if (metricsSent) {
-          return;
-        }
-        if (!isNullOrUndefined(requestInfo) &&
-            requestInfo.size !== undefined &&
-            requestInfo.requestDuration !== undefined &&
-            parsedChunks.length > 0 &&
-            parsedChunks.every(isParsed => isParsed))
-        {
-          metricsSent = true;
-          callbacks.onMetrics?.({ size: requestInfo.size,
-                                  requestDuration: requestInfo.requestDuration,
-                                  content,
-                                  segmentDuration: segmentDurationAcc });
-        }
-      }
+      log.debug("SF: Segment request cancelled", segmentIdString);
+      requestInfo = null;
+      creatorCallbacks.onRequestEnd?.({ id: requestId });
     });
+    return tryURLsWithBackoff(segment.mediaURLs ?? [null],
+                              callLoaderWithUrl,
+                              objectAssign({ onRetry }, options),
+                              cancellationSignal)
+      .then((res) => {
+        log.debug("SF: Segment request ended with success", segmentIdString);
+
+        if (res.resultType === "segment-loaded") {
+          const loadedData = res.resultData.responseData;
+          if (cache !== undefined) {
+            cache.add(content, res.resultData.responseData);
+          }
+          fetcherCallbacks.onChunk(generateParserFunction(loadedData, false));
+        } else if (res.resultType === "segment-created") {
+          fetcherCallbacks.onChunk(generateParserFunction(res.resultData, false));
+        }
+
+        log.debug("SF: Segment request ended with success", segmentIdString);
+        fetcherCallbacks.onAllChunksReceived();
+
+        if (res.resultType !== "segment-created") {
+          requestInfo = res.resultData;
+          sendNetworkMetricsIfAvailable();
+        } else {
+          requestInfo = null;
+        }
+
+        if (!cancellationSignal.isCancelled) {
+          // The current task could have been canceled as a result of one
+          // of the previous callbacks call. In that case, we don't want to send
+          // a "requestEnd" again as it has already been sent on cancellation.
+          //
+          // Note that we only perform this check for `onRequestEnd` on
+          // purpose. Observable's events should have been ignored by RxJS if
+          // the Observable has already been canceled and we don't care if
+          // `"metrics"` is sent there.
+          creatorCallbacks.onRequestEnd?.({ id: requestId });
+        }
+      })
+      .catch((err) => {
+        log.debug("SF: Segment request failed", segmentIdString);
+        requestInfo = null;
+        throw errorSelector(err);
+      });
+
+    /**
+     * Call a segment loader for the given URL with the right arguments.
+     * @param {string|null} url
+     * @param {Object} cancellationSignal
+     * @returns {Promise}
+     */
+    function callLoaderWithUrl(url : string | null) {
+      return loadSegment(url, content, cancellationSignal, loaderCallbacks);
+    }
+
+    /**
+     * Generate function allowing to parse a loaded segment.
+     * @param {*} data
+     * @param {Boolean} isChunked
+     * @returns {Function}
+     */
+    function generateParserFunction(data : TLoadedFormat, isChunked : boolean)  {
+      parsedChunks.push(false);
+      const parsedChunkId = parsedChunks.length - 1;
+      return function parse(initTimescale? : number) :
+        ISegmentParserParsedInitChunk<TSegmentDataType> |
+        ISegmentParserParsedMediaChunk<TSegmentDataType>
+      {
+        const loaded = { data, isChunked };
+
+        try {
+          const parsed = parseSegment(loaded, content, initTimescale);
+
+          if (!parsedChunks[parsedChunkId]) {
+            segmentDurationAcc = segmentDurationAcc !== undefined &&
+                                 parsed.segmentType === "media" &&
+                                 parsed.chunkInfos !== null &&
+                                 parsed.chunkInfos.duration !== undefined ?
+              segmentDurationAcc + parsed.chunkInfos.duration :
+              undefined;
+            parsedChunks[parsedChunkId] = true;
+
+            sendNetworkMetricsIfAvailable();
+          }
+          return parsed;
+        } catch (error) {
+          throw formatError(error, { defaultCode: "PIPELINE_PARSE_ERROR",
+                                     defaultReason: "Unknown parsing error" });
+        }
+      };
+    }
+
+    /**
+     * Function called when the function request is retried.
+     * @param {*} err
+     */
+    function onRetry(err: unknown) : void {
+      fetcherCallbacks.onRetry(errorSelector(err));
+    }
+
+    /**
+     * Send netork metrics if they haven't yet been sent and if all data to
+     * define them is available.
+     */
+    function sendNetworkMetricsIfAvailable() : void {
+      if (metricsSent) {
+        return;
+      }
+      if (!isNullOrUndefined(requestInfo) &&
+          requestInfo.size !== undefined &&
+          requestInfo.requestDuration !== undefined &&
+          parsedChunks.length > 0 &&
+          parsedChunks.every(isParsed => isParsed))
+      {
+        metricsSent = true;
+        creatorCallbacks.onMetrics?.({
+          size: requestInfo.size,
+          requestDuration: requestInfo.requestDuration,
+          content,
+          segmentDuration: segmentDurationAcc,
+        });
+      }
+    }
   };
 }
 
-export type ISegmentFetcher<TSegmentDataType> = (content : ISegmentLoaderContent) =>
-  Observable<ISegmentFetcherEvent<TSegmentDataType>>;
+export type ISegmentFetcher<TSegmentDataType> = (
+  content : ISegmentLoaderContent,
+  callbacks : ISegmentFetcherCallbacks<TSegmentDataType>,
+  cancellationSignal : CancellationSignal
+) => Promise<void>;
+
+export interface ISegmentFetcherCallbacks<TSegmentDataType> {
+  onChunk(
+    parse : (initTimescale : number) =>
+      ISegmentParserParsedInitChunk<TSegmentDataType> |
+      ISegmentParserParsedMediaChunk<TSegmentDataType>
+  ) : void;
+
+  onAllChunksReceived() : void;
+  onRetry(error : ICustomError) : void;
+}
 
 /** Event sent by the SegmentFetcher when fetching a segment. */
 export type ISegmentFetcherEvent<TSegmentDataType> =

@@ -19,6 +19,7 @@ import {
   Observable,
 } from "rxjs";
 import log from "../../../log";
+import {CancellationSignal} from "../../../utils/task_canceller";
 import ObservablePrioritizer, {
   IEndedTaskEvent,
   IInterruptedTaskEvent,
@@ -26,6 +27,7 @@ import ObservablePrioritizer, {
 } from "./prioritizer";
 import {
   ISegmentFetcher,
+  ISegmentFetcherCallbacks,
   ISegmentFetcherChunkCompleteEvent,
   ISegmentFetcherChunkEvent,
   ISegmentFetcherRetry,
@@ -99,8 +101,11 @@ export default function applyPrioritizerToSegmentFetcher<TSegmentDataType>(
 export interface IPrioritizedSegmentFetcher<TSegmentDataType> {
   /** Create a new request for a segment with a given priority. */
   createRequest : (content : ISegmentLoaderContent,
-                   priority? : number) =>
-    Observable<IPrioritizedSegmentFetcherEvent<TSegmentDataType>>;
+                   priority : number,
+                   // XXX TODO should we add the scheduler's callbacks here?
+                   callbacks : ISegmentFetcherCallbacks<TSegmentDataType>,
+                   cancellationSignal : CancellationSignal
+  ) => Promise<void>;
 
   /** Update priority of a request created through `createRequest`. */
   updatePriority : (
