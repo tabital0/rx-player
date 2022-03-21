@@ -316,11 +316,13 @@ export default class DownloadingQueue<T> {
           }
           self._mediaSegmentsAwaitingInitMetadata.add(segment.id);
           // XXX TODO unsub
-          self._initSegmentMetadata$.onUpdate((val, unlisten) => {
+          self._initSegmentMetadata$.onUpdate(() => {
             obs.next({ type: "end-of-segment" as const,
                        value: { segment } });
-            unlisten();
             this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
+
+            // XXX TODO?
+            return { stopListening: true };
           }, { clearSignal: canceller.signal });
       //         return this._initSegmentMetadata$.pipe(
       //           take(1),
