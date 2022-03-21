@@ -15,23 +15,18 @@
  */
 
 import {
-  concat as observableConcat,
   defer as observableDefer,
   EMPTY,
   filter,
   finalize,
-  map,
   merge as observableMerge,
-  mergeMap,
   Observable,
   of as observableOf,
-  ReplaySubject,
   share,
   switchMap,
-  take,
 } from "rxjs";
 import { ICustomError } from "../../../errors";
-import log from "../../../log";
+// import log from "../../../log";
 import Manifest, {
   Adaptation,
   ISegment,
@@ -43,9 +38,11 @@ import {
   ISegmentParserParsedMediaChunk,
 } from "../../../transports";
 import assert from "../../../utils/assert";
-import assertUnreachable from "../../../utils/assert_unreachable";
 import objectAssign from "../../../utils/object_assign";
-import createSharedReference, { IReadOnlySharedReference, ISharedReference } from "../../../utils/reference";
+import createSharedReference, {
+  IReadOnlySharedReference,
+  ISharedReference,
+} from "../../../utils/reference";
 import TaskCanceller from "../../../utils/task_canceller";
 import {
   IPrioritizedSegmentFetcher,
@@ -242,23 +239,42 @@ export default class DownloadingQueue<T> {
 
     const { segmentQueue } = this._downloadQueue.getValue();
     const currentNeededSegment = segmentQueue[0];
-    const recursivelyRequestSegments = (
+
+    /* eslint-disable-next-line @typescript-eslint/no-this-alias */
+    const self = this;
+
+    return observableDefer(() =>
+      recursivelyRequestSegments(currentNeededSegment)
+    ).pipe(finalize(() => { this._mediaSegmentRequest = null; }));
+
+    function recursivelyRequestSegments(
       startingSegment : IQueuedSegment | undefined
     ) : Observable<ILoaderRetryEvent |
                    IEndOfQueueEvent |
                    IParsedSegmentEvent<T> |
-                   IEndOfSegmentEvent
-    > => {
+                   IEndOfSegmentEvent> {
       if (startingSegment === undefined) {
         return observableOf({ type : "end-of-queue",
                               value : null });
       }
       const { segment, priority } = startingSegment;
-      const context = objectAssign({ segment }, this._content);
-      const request$ = new Observable((obs) => {
-        let isComplete = false;
+      const context = objectAssign({ segment }, self._content);
+      const request$ = new Observable<
+        ILoaderRetryEvent |
+        IEndOfQueueEvent |
+        IParsedSegmentEvent<T> |
+        IEndOfSegmentEvent
+      >((obs) => {
+        /** TaskCanceller linked to this Observable's lifecycle. */
         const canceller = new TaskCanceller();
-        this._segmentFetcher.createRequest(context,
+
+        /**
+         * If `true` , the Observable has either errored, completed, or was
+         * unsubscribed from.
+         */
+        let isComplete = false;
+
+        self._segmentFetcher.createRequest(context,
                                            priority,
                                            { onRetry,
                                              // onInterrupted,
@@ -268,26 +284,31 @@ export default class DownloadingQueue<T> {
                                            canceller.signal)
           .then(
             () => {
-              isComplete = true;
-              obs.complete();
+              if (!isComplete) {
+                isComplete = true;
+                obs.complete();
+              }
             },
             (error : unknown) => {
-              isComplete = true;
-              obs.error(error);
+              if (!isComplete) {
+                isComplete = true;
+                obs.error(error);
+              }
             }
           );
 
-        /* eslint-disable-next-line @typescript-eslint/no-this-alias */
-        const self = this;
         function onRetry(error : ICustomError) {
           obs.next({ type: "retry" as const,
                      value: { segment, error } });
         }
+
+        // XXX TODO
         // function onInterrupted() {
         //   log.info("Stream: segment request interrupted temporarly.", segment);
         // }
 
-        // let innerSub;
+        // XXX TODO
+        // let nextSegmentSubscription;
         // function onEnded() {
         //   obs.next({ type: "ended" as const });
         //   self._mediaSegmentRequest = null;
@@ -298,50 +319,34 @@ export default class DownloadingQueue<T> {
         //   } else if (lastQueue[0].segment.id === segment.id) {
         //     lastQueue.shift();
         //   }
-        //   innerSub = recursivelyRequestSegments(lastQueue[0]).subscribe(obs);
+        //   nextSegmentSubscription = recursivelyRequestSegments(lastQueue[0])
+        //     .subscribe(obs);
         // }
 
         function onChunk(
-          parse : (initTimescale : number) => ISegmentParserParsedInitChunk<T> |
-                                              ISegmentParserParsedMediaChunk<T>
+          parse : (
+            initTimescale : number | undefined
+          ) => ISegmentParserParsedInitChunk<T> | ISegmentParserParsedMediaChunk<T>
         ) {
-          obs.next({ type: "chunk" as const, value: parse });
-        }
-        function onAllChunksReceived() {
-          obs.next({ type: "chunk-complete" as const });
-          if (self._initSegmentMetadata$.getValue() !== undefined) {
-            obs.next({ type: "end-of-segment" as const,
-                       value: { segment } });
-            return;
-          }
-          self._mediaSegmentsAwaitingInitMetadata.add(segment.id);
-          // XXX TODO unsub
-          self._initSegmentMetadata$.onUpdate(() => {
-            obs.next({ type: "end-of-segment" as const,
-                       value: { segment } });
-            this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
+          self._initSegmentMetadata$.waitUntilDefined((initTimescale) => {
+            const parsed = parse(initTimescale ?? undefined);
+            assert(parsed.segmentType === "media",
+                   "Should have loaded a media segment.");
+            obs.next(objectAssign({},
+                                  parsed,
+                                  { type: "parsed-media" as const,
+                                    segment }));
 
-            // XXX TODO?
-            return { stopListening: true };
           }, { clearSignal: canceller.signal });
-      //         return this._initSegmentMetadata$.pipe(
-      //           take(1),
-      //           map((initTimescale) => {
-      //             if (evt.type === "chunk-complete") {
-      //               return { type: "end-of-segment" as const,
-      //                        value: { segment } };
-      //             }
-      //             const parsed = evt.parse(initTimescale);
-      //             assert(parsed.segmentType === "media",
-      //                    "Should have loaded a media segment.");
-      //             return objectAssign({},
-      //                                 parsed,
-      //                                 { type: "parsed-media" as const,
-      //                                   segment });
-      //           }),
-      //           finalize(() => {
-      //             this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
-      //           }));
+        }
+
+        function onAllChunksReceived() {
+          self._mediaSegmentsAwaitingInitMetadata.add(segment.id);
+          self._initSegmentMetadata$.waitUntilDefined(() => {
+            obs.next({ type: "end-of-segment" as const,
+                       value: { segment } });
+            self._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
+          }, { clearSignal: canceller.signal });
         }
 
         return () => {
@@ -349,68 +354,18 @@ export default class DownloadingQueue<T> {
             return;
           }
           isComplete = true;
-          // if (innerSub) {
-          //   innerSub.unsubscribe();
-          // }
           // XXX TODO
-          this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
+          // if (nextSegmentSubscription !== undefined) {
+          //   nextSegmentSubscription.unsubscribe();
+          // }
+          self._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
           canceller.cancel();
         };
       });
       // XXX TODO
-      this._mediaSegmentRequest = { segment, priority, request$ };
+      // self._mediaSegmentRequest = { segment, priority, request$ };
       return request$;
-      // return request$
-      //   .pipe(mergeMap((evt) => {
-      //     switch (evt.type) {
-      //       case "retry":
-      //         return observableOf({ type: "retry" as const,
-      //                               value: { segment, error: evt.value } });
-      //       case "interrupted":
-      //         return EMPTY;
-
-      //       case "ended":
-      //         this._mediaSegmentRequest = null;
-      //         const lastQueue = this._downloadQueue.getValue().segmentQueue;
-      //         if (lastQueue.length === 0) {
-      //           return observableOf({ type : "end-of-queue" as const,
-      //                                 value : null });
-      //         } else if (lastQueue[0].segment.id === segment.id) {
-      //           lastQueue.shift();
-      //         }
-      //         return recursivelyRequestSegments(lastQueue[0]);
-
-      //       case "chunk":
-      //       case "chunk-complete":
-      //         this._mediaSegmentsAwaitingInitMetadata.add(segment.id);
-      //         return this._initSegmentMetadata$.pipe(
-      //           take(1),
-      //           map((initTimescale) => {
-      //             if (evt.type === "chunk-complete") {
-      //               return { type: "end-of-segment" as const,
-      //                        value: { segment } };
-      //             }
-      //             const parsed = evt.parse(initTimescale);
-      //             assert(parsed.segmentType === "media",
-      //                    "Should have loaded a media segment.");
-      //             return objectAssign({},
-      //                                 parsed,
-      //                                 { type: "parsed-media" as const,
-      //                                   segment });
-      //           }),
-      //           finalize(() => {
-      //             this._mediaSegmentsAwaitingInitMetadata.delete(segment.id);
-      //           }));
-
-      //       default:
-      //         assertUnreachable(evt);
-      //     }
-      //   }));
-    };
-
-    return observableDefer(() =>
-      recursivelyRequestSegments(currentNeededSegment)
-    ).pipe(finalize(() => { this._mediaSegmentRequest = null; }));
+    }
   }
 
   /**
@@ -427,55 +382,81 @@ export default class DownloadingQueue<T> {
       this._initSegmentRequest = null;
       return EMPTY;
     }
-    const { segment, priority } = queuedInitSegment;
-    const context = objectAssign({ segment }, this._content);
-    const request$ = this._segmentFetcher.createRequest(context, priority);
 
-    this._initSegmentRequest = { segment, priority, request$ };
-    return request$
-      .pipe(mergeMap((evt) : Observable<ILoaderRetryEvent |
-                                        IParsedInitSegmentEvent<T> |
-                                        IEndOfSegmentEvent> =>
-      {
-        switch (evt.type) {
-          case "retry":
-            return observableOf({ type: "retry" as const,
-                                  value: { segment, error: evt.value } });
-          case "interrupted":
-            log.info("Stream: init segment request interrupted temporarly.", segment);
-            return EMPTY;
+    /* eslint-disable-next-line @typescript-eslint/no-this-alias */
+    const self = this;
+    const request$ = new Observable<
+      ILoaderRetryEvent |
+      IParsedInitSegmentEvent<T> |
+      IEndOfSegmentEvent
+    >((obs) => {
+      /** TaskCanceller linked to this Observable's lifecycle. */
+      const canceller = new TaskCanceller();
+      const { segment, priority } = queuedInitSegment;
+      const context = objectAssign({ segment }, this._content);
 
-          case "chunk":
-            const parsed = evt.parse(undefined);
-            assert(parsed.segmentType === "init",
-                   "Should have loaded an init segment.");
-            return observableConcat(
-              observableOf(objectAssign({},
-                                        parsed,
-                                        { type: "parsed-init" as const,
-                                          segment })),
+      /**
+       * If `true` , the Observable has either errored, completed, or was
+       * unsubscribed from.
+       */
+      let isComplete = false;
+      this._segmentFetcher.createRequest(context, priority, {
+        onRetry(err : ICustomError) {
+          obs.next({ type: "retry" as const,
+                     value: { segment, error: err } });
+        },
+        // XXX TODO
+        // onInterrupted() {
+        //   log.info("Stream: init segment request interrupted temporarly.", segment);
+        // },
+        // onEnded() { /* do nothing */ }
+        onChunk(parse : (x : undefined) => ISegmentParserParsedInitChunk<T> |
+                                           ISegmentParserParsedMediaChunk<T>)
+        {
+          const parsed = parse(undefined);
+          assert(parsed.segmentType === "init",
+                 "Should have loaded an init segment.");
+          obs.next(objectAssign({},
+                                parsed,
+                                { type: "parsed-init" as const,
+                                  segment }));
+          if (parsed.segmentType === "init") {
+            self._initSegmentMetadata$.setValue(parsed.initTimescale ?? null);
+          }
 
-              // We want to emit parsing information strictly AFTER the
-              // initialization segment is emitted. Hence why we perform this
-              // side-effect a posteriori in a concat operator
-              observableDefer(() => {
-                if (parsed.segmentType === "init") {
-                  // XXX TODO `null` if undefined
-                  this._initSegmentMetadata$.setValue(parsed.initTimescale);
-                }
-                return EMPTY;
-              }));
-
-          case "chunk-complete":
-            return observableOf({ type: "end-of-segment" as const,
-                                  value: { segment } });
-
-          case "ended":
-            return EMPTY; // Do nothing, just here to check every case
-          default:
-            assertUnreachable(evt);
+        },
+        onAllChunksReceived() {
+          obs.next({ type: "end-of-segment" as const,
+                     value: { segment } });
+        },
+      }, canceller.signal).then(
+        () => {
+          if (!isComplete) {
+            isComplete = true;
+            obs.complete();
+          }
+        },
+        (error : unknown) => {
+          if (!isComplete) {
+            isComplete = true;
+            obs.error(error);
+          }
         }
-      })).pipe(finalize(() => { this._initSegmentRequest = null; }));
+      );
+
+      return () => {
+        self._initSegmentRequest = null;
+        if (isComplete) {
+          return;
+        }
+        isComplete = true;
+        canceller.cancel();
+      };
+    });
+
+    // XXX TODO
+    // this._initSegmentRequest = { segment, priority, request$ };
+    return request$;
   }
 }
 

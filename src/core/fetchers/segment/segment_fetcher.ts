@@ -323,7 +323,7 @@ export type ISegmentFetcher<TSegmentDataType> = (
 
 export interface ISegmentFetcherCallbacks<TSegmentDataType> {
   onChunk(
-    parse : (initTimescale : number) =>
+    parse : (initTimescale : number | undefined) =>
       ISegmentParserParsedInitChunk<TSegmentDataType> |
       ISegmentParserParsedMediaChunk<TSegmentDataType>
   ) : void;
