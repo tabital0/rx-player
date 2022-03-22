@@ -299,8 +299,7 @@ export class CancellationSignal {
 export type ICancellationListener = (error : CancellationError) => void;
 
 /**
- * Error created when a task is cancelled through the TaskCanceller.
- *
+ * Error created when a task is cancelled.
  * @class CancellationError
  * @extends Error
  */
@@ -308,9 +307,6 @@ export class CancellationError extends Error {
   public readonly name : "CancellationError";
   public readonly message : string;
 
-  /**
-   * @param {string} message
-   */
   constructor() {
     super();
     // @see https://stackoverflow.com/questions/41102060/typescript-extending-error-class
