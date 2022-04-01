@@ -328,7 +328,7 @@ export default function StallAvoider(
       // implementation that might drop an injected segment, or in
       // case of small discontinuity in the content.
       const nextBufferRangeGap = getNextRangeGap(buffered, freezePosition);
-      if (nextBufferRangeGap < BUFFER_DISCONTINUITY_THRESHOLD) {
+      if (!observation.paused && nextBufferRangeGap < BUFFER_DISCONTINUITY_THRESHOLD) {
         const seekTo = (freezePosition + nextBufferRangeGap + EPSILON);
         if (playbackObserver.getCurrentTime() < seekTo) {
           log.warn("Init: discontinuity encountered inferior to the threshold",

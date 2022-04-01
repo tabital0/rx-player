@@ -301,7 +301,10 @@ export default function RepresentationStream<TSegmentDataType>({
                    IStreamNeedsManifestRefresh |
                    IStreamTerminatingEvent>
     {
-      const wantedStartPosition = observation.position + observation.wantedTimeOffset;
+      const wantedStartPosition = Math.max(
+        observation.position + observation.wantedTimeOffset - 0.25,
+        0
+      );
       const status = getBufferStatus(content,
                                      wantedStartPosition,
                                      playbackObserver,
