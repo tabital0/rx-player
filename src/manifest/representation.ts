@@ -240,8 +240,7 @@ class Representation {
    *
    * TODO better handle use cases like key rotation by not always grouping
    * every protection data together? To check.
-   * @param {string} initDataArr
-   * @param {string} systemId
+   * @param {string} initDataType
    * @param {Uint8Array} data
    * @returns {boolean}
    */

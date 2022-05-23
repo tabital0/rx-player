@@ -99,7 +99,7 @@ export default function generateAudioVideoSegmentParser(
                                                               segment,
                                                               initTimescale) :
                                         null; // TODO extract time info from webm
-      const chunkOffset = takeFirstSet<number>(segment.timestampOffset, 0);
+      const chunkOffset = segment.timestampOffset ?? 0;
 
       if (seemsToBeMP4) {
         const parsedEMSGs = parseEmsgBoxes(chunkData);
