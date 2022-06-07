@@ -42,7 +42,7 @@ import {
   IAudioTrackPreference,
   ITextTrackPreference,
   IVideoTrackPreference,
-} from "./track_choice_manager";
+} from "./tracks_management/track_choice_manager";
 
 export { IKeySystemOption };
 

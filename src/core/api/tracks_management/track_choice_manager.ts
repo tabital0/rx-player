@@ -20,19 +20,19 @@
  */
 
 import { Subject } from "rxjs";
-import log from "../../log";
+import log from "../../../log";
 import {
   Adaptation,
   IHDRInformation,
   Period,
   Representation,
-} from "../../manifest";
-import arrayFind from "../../utils/array_find";
-import arrayIncludes from "../../utils/array_includes";
-import isNullOrUndefined from "../../utils/is_null_or_undefined";
-import normalizeLanguage from "../../utils/languages";
-import SortedList from "../../utils/sorted_list";
-import takeFirstSet from "../../utils/take_first_set";
+} from "../../../manifest";
+import arrayFind from "../../../utils/array_find";
+import arrayIncludes from "../../../utils/array_includes";
+import isNullOrUndefined from "../../../utils/is_null_or_undefined";
+import normalizeLanguage from "../../../utils/languages";
+import SortedList from "../../../utils/sorted_list";
+import takeFirstSet from "../../../utils/take_first_set";
 
 /** Single preference for an audio track Adaptation. */
 export type IAudioTrackPreference = null |

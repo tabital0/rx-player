@@ -23,7 +23,7 @@ export {
   IStreamEventData,
 } from "./public_api";
 export { PlaybackObserver };
-export { IPlayerState } from "./get_player_state";
+export { IPlayerState } from "./utils";
 export {
   IPlaybackObservation,
   IPlaybackObserverEventType,
@@ -57,5 +57,5 @@ export {
   IAudioTrackPreference,
   ITextTrackPreference,
   IVideoTrackPreference,
-} from "./track_choice_manager";
+} from "./tracks_management/track_choice_manager";
 export default Player;

@@ -26,11 +26,11 @@ import {
   ICompatTextTrackList,
   ICompatVideoTrack,
   ICompatVideoTrackList,
-} from "../../compat/browser_compatibility_types";
-import { Representation } from "../../manifest";
-import assert from "../../utils/assert";
-import EventEmitter from "../../utils/event_emitter";
-import normalizeLanguage from "../../utils/languages";
+} from "../../../compat/browser_compatibility_types";
+import { Representation } from "../../../manifest";
+import assert from "../../../utils/assert";
+import EventEmitter from "../../../utils/event_emitter";
+import normalizeLanguage from "../../../utils/languages";
 import {
   IAudioTrackPreference,
   ITextTrackPreference,

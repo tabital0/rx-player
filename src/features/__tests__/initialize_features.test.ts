@@ -117,7 +117,8 @@ describe("Features - initializeFeaturesObject", () => {
       directfile: {
         initDirectFile: require("../../core/init/initialize_directfile").default,
         mediaElementTrackChoiceManager:
-          require("../../core/api/media_element_track_choice_manager").default,
+          require("../../core/api/tracks_management/media_element_track_choice_manager")
+            .default,
       },
       imageBuffer: require(
         "../../core/segment_buffers/implementations/image/index"
