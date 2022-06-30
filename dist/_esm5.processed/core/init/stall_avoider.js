@@ -108,7 +108,15 @@ export default function StallAvoider(playbackObserver, manifest, lockedStream$, 
         var observation = _a[0], discontinuitiesStore = _a[1];
         var buffered = observation.buffered, position = observation.position, readyState = observation.readyState, rebuffering = observation.rebuffering, freezing = observation.freezing;
         var _c = config.getCurrent(), BUFFER_DISCONTINUITY_THRESHOLD = _c.BUFFER_DISCONTINUITY_THRESHOLD, FORCE_DISCONTINUITY_SEEK_DELAY = _c.FORCE_DISCONTINUITY_SEEK_DELAY, FREEZING_STALLED_DELAY = _c.FREEZING_STALLED_DELAY, UNFREEZING_SEEK_DELAY = _c.UNFREEZING_SEEK_DELAY, UNFREEZING_DELTA_POSITION = _c.UNFREEZING_DELTA_POSITION;
-        var prevLastSeekPosition = lastSeekingPosition;
+        if (!observation.seeking &&
+            isSeekingApproximate &&
+            ignoredStallTimeStamp === null &&
+            lastSeekingPosition !== null &&
+            observation.position < lastSeekingPosition) {
+            log.debug("Init: the device appeared to have seeked back by itself.");
+            var now = performance.now();
+            ignoredStallTimeStamp = now;
+        }
         lastSeekingPosition = observation.seeking ?
             Math.max((_b = observation.pendingInternalSeek) !== null && _b !== void 0 ? _b : 0, observation.position) :
             null;
@@ -154,22 +162,15 @@ export default function StallAvoider(playbackObserver, manifest, lockedStream$, 
             observation.pendingInternalSeek !== null ?
             "internal-seek" :
             rebuffering.reason;
-        if (!observation.seeking && prevLastSeekPosition !== null) {
+        if (ignoredStallTimeStamp !== null) {
             var now = performance.now();
-            if (ignoredStallTimeStamp === null) {
-                ignoredStallTimeStamp = now;
+            if (now - ignoredStallTimeStamp < FORCE_DISCONTINUITY_SEEK_DELAY) {
+                log.debug("Init: letting the device get out of a stall by itself");
+                return { type: "stalled",
+                    value: stalledReason };
             }
-            if (isSeekingApproximate) {
-                if (observation.position < prevLastSeekPosition) {
-                    log.debug("Init: the device appeared to have seeked back by itself.");
-                    if (now - ignoredStallTimeStamp < FORCE_DISCONTINUITY_SEEK_DELAY) {
-                        return { type: "stalled",
-                            value: stalledReason };
-                    }
-                    else {
-                        log.warn("Init: ignored stall for too long, checking discontinuity", now - ignoredStallTimeStamp);
-                    }
-                }
+            else {
+                log.warn("Init: ignored stall for too long, checking discontinuity", now - ignoredStallTimeStamp);
             }
         }
         ignoredStallTimeStamp = null;

@@ -11752,22 +11752,28 @@ function StallAvoider(playbackObserver, manifest, lockedStream$, discontinuityUp
         UNFREEZING_SEEK_DELAY = _config$getCurrent.UNFREEZING_SEEK_DELAY,
         UNFREEZING_DELTA_POSITION = _config$getCurrent.UNFREEZING_DELTA_POSITION;
 
-    var prevLastSeekPosition = lastSeekingPosition;
+    if (!observation.seeking && is_seeking_approximate && ignoredStallTimeStamp === null && lastSeekingPosition !== null && observation.position < lastSeekingPosition) {
+      log/* default.debug */.Z.debug("Init: the device appeared to have seeked back by itself.");
+      var now = performance.now();
+      ignoredStallTimeStamp = now;
+    }
+
     lastSeekingPosition = observation.seeking ? Math.max((_a = observation.pendingInternalSeek) !== null && _a !== void 0 ? _a : 0, observation.position) : null;
 
     if (freezing !== null) {
-      var now = performance.now();
+      var _now = performance.now();
+
       var referenceTimestamp = prevFreezingState === null ? freezing.timestamp : prevFreezingState.attemptTimestamp;
 
-      if (now - referenceTimestamp > UNFREEZING_SEEK_DELAY) {
+      if (_now - referenceTimestamp > UNFREEZING_SEEK_DELAY) {
         log/* default.warn */.Z.warn("Init: trying to seek to un-freeze player");
         playbackObserver.setCurrentTime(playbackObserver.getCurrentTime() + UNFREEZING_DELTA_POSITION);
         prevFreezingState = {
-          attemptTimestamp: now
+          attemptTimestamp: _now
         };
       }
 
-      if (now - freezing.timestamp > FREEZING_STALLED_DELAY) {
+      if (_now - freezing.timestamp > FREEZING_STALLED_DELAY) {
         return {
           type: "stalled",
           value: "freezing"
@@ -11805,26 +11811,17 @@ function StallAvoider(playbackObserver, manifest, lockedStream$, discontinuityUp
 
     var stalledReason = rebuffering.reason === "seeking" && observation.pendingInternalSeek !== null ? "internal-seek" : rebuffering.reason;
 
-    if (!observation.seeking && prevLastSeekPosition !== null) {
-      var _now = performance.now();
+    if (ignoredStallTimeStamp !== null) {
+      var _now2 = performance.now();
 
-      if (ignoredStallTimeStamp === null) {
-        ignoredStallTimeStamp = _now;
-      }
-
-      if (is_seeking_approximate) {
-        if (observation.position < prevLastSeekPosition) {
-          log/* default.debug */.Z.debug("Init: the device appeared to have seeked back by itself.");
-
-          if (_now - ignoredStallTimeStamp < FORCE_DISCONTINUITY_SEEK_DELAY) {
-            return {
-              type: "stalled",
-              value: stalledReason
-            };
-          } else {
-            log/* default.warn */.Z.warn("Init: ignored stall for too long, checking discontinuity", _now - ignoredStallTimeStamp);
-          }
-        }
+      if (_now2 - ignoredStallTimeStamp < FORCE_DISCONTINUITY_SEEK_DELAY) {
+        log/* default.debug */.Z.debug("Init: letting the device get out of a stall by itself");
+        return {
+          type: "stalled",
+          value: stalledReason
+        };
+      } else {
+        log/* default.warn */.Z.warn("Init: ignored stall for too long, checking discontinuity", _now2 - ignoredStallTimeStamp);
       }
     }
 
@@ -61310,7 +61307,7 @@ var Player = /*#__PURE__*/function (_EventEmitter) {
     videoElement.preload = "auto";
     _this.version =
     /* PLAYER_VERSION */
-    "3.28.0-samsung.seek2";
+    "3.28.0-samsung.seek3";
     _this.log = log/* default */.Z;
     _this.state = "STOPPED";
     _this.videoElement = videoElement;
@@ -64131,7 +64128,7 @@ var Player = /*#__PURE__*/function (_EventEmitter) {
 
 Player.version =
 /* PLAYER_VERSION */
-"3.28.0-samsung.seek2";
+"3.28.0-samsung.seek3";
 /* harmony default export */ var public_api = (Player);
 ;// CONCATENATED MODULE: ./src/core/api/index.ts
 /**
