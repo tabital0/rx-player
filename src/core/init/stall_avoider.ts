@@ -227,7 +227,18 @@ export default function StallAvoider(
               UNFREEZING_SEEK_DELAY,
               UNFREEZING_DELTA_POSITION } = config.getCurrent();
 
-      const prevLastSeekPosition = lastSeekingPosition;
+      if (
+        !observation.seeking &&
+        isSeekingApproximate &&
+        ignoredStallTimeStamp === null &&
+        lastSeekingPosition !== null &&
+        observation.position < lastSeekingPosition
+      ) {
+        log.debug("Init: the device appeared to have seeked back by itself.");
+        const now = performance.now();
+        ignoredStallTimeStamp = now;
+      }
+
       lastSeekingPosition = observation.seeking ?
         Math.max(observation.pendingInternalSeek ?? 0, observation.position) :
         null;
@@ -279,22 +290,15 @@ export default function StallAvoider(
         "internal-seek" as const :
         rebuffering.reason;
 
-      if (!observation.seeking && prevLastSeekPosition !== null) {
+      if (ignoredStallTimeStamp !== null) {
         const now = performance.now();
-        if (ignoredStallTimeStamp === null) {
-          ignoredStallTimeStamp = now;
-        }
-        if (isSeekingApproximate) {
-          if (observation.position < prevLastSeekPosition) {
-            log.debug("Init: the device appeared to have seeked back by itself.");
-            if (now - ignoredStallTimeStamp < FORCE_DISCONTINUITY_SEEK_DELAY) {
-              return { type: "stalled" as const,
-                       value: stalledReason };
-            } else {
-              log.warn("Init: ignored stall for too long, checking discontinuity",
-                       now - ignoredStallTimeStamp);
-            }
-          }
+        if (now - ignoredStallTimeStamp < FORCE_DISCONTINUITY_SEEK_DELAY) {
+          log.debug("Init: letting the device get out of a stall by itself");
+          return { type: "stalled" as const,
+                   value: stalledReason };
+        } else {
+          log.warn("Init: ignored stall for too long, checking discontinuity",
+                   now - ignoredStallTimeStamp);
         }
       }
 
